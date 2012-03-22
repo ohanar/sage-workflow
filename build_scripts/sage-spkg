@@ -175,22 +175,21 @@ PKG_BASE=`echo "$PKG_NAME" | sed -e "s/-.*//"`
 if [ ! -f "$PKG_SRC" ]; then
     if [ -f "$SAGE_PACKAGES/standard/$PKG_NAME.spkg" ]; then
         PKG_SRC="$SAGE_PACKAGES/standard/$PKG_NAME.spkg"
+    elif [ -f "$SAGE_PACKAGES/optional/$PKG_NAME.spkg" ]; then
+        PKG_SRC="$SAGE_PACKAGES/optional/$PKG_NAME.spkg"
     elif [ -d "$SAGE_ROOT/devel/sage/spkg/$PKG_NAME" ]; then
         GIT_LAYOUT=yes
+        PKG_SRC="$SAGE_ROOT/dist/$(echo "$PKG_NAME" | sed 's/\.p[0-9][0-9]*//').tar.bz2"
     else
-        if [ -f "$SAGE_PACKAGES/optional/$PKG_NAME.spkg" ]; then
-            PKG_SRC="$SAGE_PACKAGES/optional/$PKG_NAME.spkg"
+        CUR=`pwd`
+        cd "$SAGE_PACKAGES"
+        PKG_NEWEST_VER=`./standard/newest_version "$PKG_NAME" 2> /dev/null`
+        if [ -n "$PKG_NEWEST_VER" ]; then
+            PKG_SRC="$SAGE_PACKAGES/standard/$PKG_NEWEST_VER.spkg"
         else
-            CUR=`pwd`
-            cd "$SAGE_PACKAGES"
-            PKG_NEWEST_VER=`./standard/newest_version "$PKG_NAME" 2> /dev/null`
+            PKG_NEWEST_VER=`./standard/newest_version -base "$PKG_NAME" 2> /dev/null`
             if [ -n "$PKG_NEWEST_VER" ]; then
                 PKG_SRC="$SAGE_PACKAGES/standard/$PKG_NEWEST_VER.spkg"
-            else
-                PKG_NEWEST_VER=`./standard/newest_version -base "$PKG_NAME" 2> /dev/null`
-                if [ -n "$PKG_NEWEST_VER" ]; then
-                    PKG_SRC="$SAGE_PACKAGES/standard/$PKG_NEWEST_VER.spkg"
-                fi
             fi
         fi
     fi
@@ -261,9 +260,7 @@ else
     done
 fi
 
-if [ ! -z "$GIT_LAYOUT" ]; then
-    PKG_SRC="$SAGE_ROOT/dist/$PKG_NAME.tar.bz2"
-elif [ ! -f "$PKG_SRC" ]; then
+if [ ! -f "$PKG_SRC" ]; then
     echo "$0: file $PKG_NAME does not exist"
     echo "Attempting to download it."
     CUR=`pwd`
