@@ -23,8 +23,8 @@ die () {
     exit 1
 }
 
-usage() {
-  echo "usage: $CMD -i sagedir -o outdir -t tmpdir"
+usage () {
+    echo "usage: $CMD -i sagedir -o outdir -t tmpdir"
 }
 
 # parse command line options
@@ -40,16 +40,17 @@ shift $((OPTIND-1))
 
 # read options if not explicitly specified
 if [ -z "$SAGEDIR" ]; then
-    [ $# -ge 1 ] || die $(usage)
+    [ -d "$1" ] || die $(usage)
     SAGEDIR="$1"
     shift
 fi
 if [ -z "$OUTDIR" ]; then
-    [ $# -ge 1 ] || die $(usage)
+    [ -d "$1" ] || die $(usage)
     OUTDIR="$1"
     shift
 fi
-[ -z "$TMPDIR" ] && TMPDIR="/tmp/consolidate-repos"
+[ -z "$TMPDIR" ] && TMPDIR="$(mktemp -d /tmp/consolidate-repos.XXXX)" &&
+        echo "Created directory $TMPDIR"
 
 mkdir -p "$TMPDIR" && cd "$TMPDIR" && rm -rf *
 
@@ -60,8 +61,8 @@ git init "$TMPDIR"/sage-repo && cd "$TMPDIR"/sage-repo
 mkdir -p "$OUTDIR"/dist
 mkdir "$TMPDIR"/spkg
 for TARBALL in "$SAGEDIR"/spkg/base/*.tar*; do
-    PKGNAME=$(sed -e 's/.*\/\([^/-]*\)-\([^/]*\)\.tar.*$/\1/' <<<"$TARBALL")
-    PKGVER=$(sed -e 's/.*\/\([^/-]*\)-\([^/]*\)\.tar.*$/\2/' <<<"$TARBALL")
+    PKGNAME=$(sed -e 's/.*\/\([^/]*\)-[0-9]\{1,\}.*$/\1/' <<<"$TARBALL")
+    PKGVER=$(sed -e 's/^-\(.*\)\.tar.*$/\1/' <<<"${TARBALL#*${PKGNAME}}")
     tar x -p -C "$TMPDIR"/spkg -f $TARBALL
     tar c -f "$OUTDIR"/dist/$PKGNAME-$PKGVER.tar -C "$TMPDIR"/spkg/ $PKGNAME-$PKGVER
 done
@@ -70,12 +71,11 @@ done
 # also tarball the src/ directories of the SPKGs and put them into a dist/ directory
 rm -f "$OUTDIR"/unknown.txt
 mkdir "$TMPDIR"/spkg-git
-for SPKG in $(find "$SAGEDIR"/spkg/standard -regex '.*/[^/]*\.spkg' -type f)
-do
+for SPKG in "$SAGEDIR"/spkg/standard/*.spkg; do
     # figure out what the spkg is
-    PKGNAME=$(sed -e 's/.*\/\([^/-]*\)-\([^/]*\)\.spkg$/\1/' <<<"$SPKG")
-    PKGVER=$(sed -e 's/.*\/\([^/-]*\)-\([^/]*\)\.spkg$/\2/' <<<"$SPKG")
-    echo Found SPKG: $PKGNAME version $PKGVER
+    PKGNAME=$(sed -e 's/.*\/\([^/]*\)-[0-9]\{1,\}.*$/\1/' <<<"$SPKG")
+    PKGVER=$(sed -e 's/^-\(.*\)\.spkg$/\1/' <<<"${SPKG#*${PKGNAME}}")
+    echo "Found SPKG: $PKGNAME version $PKGVER"
     tar x -p -C "$TMPDIR"/spkg -f $SPKG
 
     # determine eventual subtree of the spkg's repo
@@ -87,7 +87,7 @@ do
         sage_scripts) REPO=bin ;;
         *)
             mv -T "$TMPDIR"/spkg/$PKGNAME-$PKGVER/src "$TMPDIR"/spkg/$PKGNAME-$PKGVER/$PKGNAME-$PKGVER
-            tar c -f "$OUTDIR"/dist/$PKGNAME-$PKGVER.tar -C "$TMPDIR"/spkg/$PKGNAME-$PKGVER/ $PKGNAME-$PKGVER
+            tar c -jf "$OUTDIR"/dist/$PKGNAME-$PKGVER.tar.bz2 -C "$TMPDIR"/spkg/$PKGNAME-$PKGVER/ $PKGNAME-$PKGVER
             REPO=spkg/$PKGNAME
         ;;
     esac
@@ -113,11 +113,54 @@ do
     git filter-branch -f -d "$TMPDIR"/filter-branch --index-filter "git ls-files -s | sed \"s+\t\\\"*+&$BRANCH/+\" | GIT_INDEX_FILE=\$GIT_INDEX_FILE.new git update-index --index-info && mv \"\$GIT_INDEX_FILE.new\" \"\$GIT_INDEX_FILE\"" $BRANCH
 done
 
-# humongous octomerge -- needs to be fixed into one merge
-for BRANCH in $BRANCHES;
-do
-    git merge "$BRANCH" || die "There was an error merging in $BRANCH, please inspect"
-done
+
+# Humongous octomerge
+
+# Put together a directory listing for the repo to commit in the merge
+MERGEOBJS=$(
+    for BRANCH in $BRANCHES
+    do
+        ENTRY=$(git ls-tree $BRANCH) # an object-filename association
+        if [ $(cut -f2 <<<"$ENTRY") == "spkg" ]; then
+            # In this case, $BRANCH associates a subdirectory listing
+            # to spkg containing a single dir. We ignore this
+            # association and instead collect all the dirs that the
+            # various branches insist are sole occupants of spkg/ ,
+            # and produce a combined listing for spkg/ .
+            PKGDIR_ENTRY=$(git ls-tree $(git ls-tree $BRANCH spkg | cut -d' ' -f3 | cut -f1))
+            PKGOBJS="${PKGOBJS}${PKGDIR_ENTRY}\n"
+        else
+            # At the same time, we continue producing a listing of the
+            # root dir on stdout. (This case should only happen four
+            # times, when $BRANCH is one of the four special cases.)
+            echo "$ENTRY"
+        fi
+    done
+
+    # Produce a new directory listing object for spkg/ from the
+    # information gathered above, then dump that object into the
+    # listing of the root directory which we are building on
+    # stdout. --batch is used because there's an extra newline at the
+    # end of $PKGOBJS.
+    PKGTREE=$(echo -e "$PKGOBJS" | git mktree --missing --batch)
+    echo -e "040000 tree $PKGTREE\tspkg"
+)
+# Actually make the directory listing into a git object
+MERGETREE=$(echo -e "$MERGEOBJS" | git mktree --missing)
+# Commit the new fully consolidated file tree
+MERGECOMMIT=$(
+    {
+        for BRANCH in $BRANCHES
+        do
+            echo '-p '$(git show-ref -s --heads $BRANCH)
+        done
+    } | xargs git commit-tree $MERGETREE -m "ePiC oCtOmErGe"
+)
+# Set up a new master branch and delete the dummy branch, and we're
+# done!
+git checkout -b master $MERGECOMMIT
+git branch -D dummy
+
 
 # cleanup stuff related to each original repository, delete their respective branches
 for BRANCH in $BRANCHES;
@@ -134,10 +177,11 @@ do
 done
 git add .gitignore
 git commit -am "Post-consolidation cleanup"
+git gc --aggressive
 
 # unpack the root layout of the new consolidated-repo-based Sage installation
 cp -r base/* "$OUTDIR"/
 # install the consolidated repo therein
 cd "$TMPDIR"
 mv sage-repo sage
-mkdir -p "$OUTDIR"/devel && tar c -f "$OUTDIR"/devel/sage.tar sage
+mkdir -p "$OUTDIR"/devel && tar c -jf "$OUTDIR"/devel/sage.tar.bz2 sage
